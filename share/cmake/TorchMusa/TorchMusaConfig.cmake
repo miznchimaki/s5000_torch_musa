@@ -1,0 +1,119 @@
+include(FindPackageHandleStandardArgs)
+
+set(INSTALL_LIBDIR "lib")
+
+# configure MUSA related things
+if(NOT DEFINED ENV{MUSA_HOME})
+  set(MUSA_PATH "/usr/local/musa")
+  set(ENV{MUSA_HOME} "${MUSA_PATH}")
+else()
+  set(MUSA_PATH $ENV{MUSA_HOME})
+endif()
+list(
+  APPEND CMAKE_MODULE_PATH
+  "${MUSA_PATH}/cmake"
+  "${MUSA_PATH}/${INSTALL_LIB_DIR}/cmake"
+)
+find_package(MUSA REQUIRED)
+set(DEPENDENT_TARGETS)
+
+# toolkit
+find_package(MUSAToolkit REQUIRED)
+list(APPEND DEPENDENT_TARGETS MUSA::toolkit)
+
+# mudnn
+list(APPEND CMAKE_MODULE_PATH "${MUSA_PATH}/${INSTALL_LIBDIR}/cmake/mudnn")
+include(mudnnTargets)
+list(APPEND DEPENDENT_TARGETS mudnn)
+list(POP_BACK CMAKE_MODULE_PATH)
+
+# mccl
+if(NOT DEFINED USE_MCCL)
+  set(USE_MCCL ON)
+endif()
+if(USE_MCCL)
+  find_package(MCCL REQUIRED)
+  add_library(mccl SHARED IMPORTED)
+  set_target_properties(mccl PROPERTIES
+    IMPORTED_LOCATION ${MCCL_LIBRARIES}
+    INTERFACE_INCLUDE_DIRECTORIES ${MCCL_INCLUDE_DIRS}
+  )
+  list(APPEND DEPENDENT_TARGETS mccl)
+endif()
+
+# python
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
+list(APPEND DEPENDENT_TARGETS Python::Python)
+
+# torch
+execute_process(
+  COMMAND ${Python_EXECUTABLE} -c "
+import os
+os.environ[\"TORCH_DEVICE_BACKEND_AUTOLOAD\"] = \"0\"
+import torch
+print(torch.utils.cmake_prefix_path)
+"
+  OUTPUT_VARIABLE TORCH_PYTHONPATH
+)
+string(REGEX REPLACE "^(.+)\n$" "\\1" TORCH_PYTHONPATH ${TORCH_PYTHONPATH})
+list(APPEND CMAKE_PREFIX_PATH ${TORCH_PYTHONPATH})
+find_package(Torch REQUIRED CONFIG)
+list(POP_BACK CMAKE_PREFIX_PATH)
+
+execute_process(
+  COMMAND ${Python_EXECUTABLE} -c "
+import os
+os.environ[\"TORCH_DEVICE_BACKEND_AUTOLOAD\"] = \"0\"
+from torch.utils.cpp_extension import TORCH_LIB_PATH
+print(TORCH_LIB_PATH)
+"
+  OUTPUT_VARIABLE TORCH_LIBDIR
+)
+string(REGEX REPLACE "^(.+)\n$" "\\1" TORCH_LIBDIR ${TORCH_LIBDIR})
+
+set(TORCH_LIBS)
+foreach (_arg c10 torch torch_cpu torch_python)
+  find_library(${_arg}_LIBRARY ${_arg} PATHS ${TORCH_LIBDIR} REQUIRED)
+  list(APPEND TORCH_LIBS ${${_arg}_LIBRARY})
+endforeach()
+
+add_library(_torch INTERFACE)
+set_target_properties(_torch PROPERTIES
+  INTERFACE_LINK_LIBRARIES "${TORCH_LIBS}"
+  INTERFACE_COMPILE_OPTIONS $<TARGET_PROPERTY:torch,INTERFACE_COMPILE_OPTIONS>
+  INTERFACE_COMPILE_FEATURES "cxx_std_$<TARGET_PROPERTY:torch,CXX_STANDARD>"
+)
+list(APPEND DEPENDENT_TARGETS _torch)
+
+# torch_musa
+if(DEFINED ENV{TorchMusa_INSTALL_PREFIX})
+  set(TorchMusa_INSTALL_PREFIX $ENV{TorchMusa_INSTALL_PREFIX})
+else()
+  get_filename_component(CMAKE_CURRENT_LIST_DIR "${CMAKE_CURRENT_LIST_FILE}" PATH)
+  get_filename_component(TorchMusa_INSTALL_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+endif()
+
+if(EXISTS "${TorchMusa_INSTALL_PREFIX}/torch_musa")
+  get_filename_component(TorchMusa_INSTALL_PREFIX "${TorchMusa_INSTALL_PREFIX}/torch_musa" ABSOLUTE)
+endif()
+
+set(TorchMusa_INCLUDE_DIRS
+  ${TorchMusa_INSTALL_PREFIX}/..
+  ${TorchMusa_INSTALL_PREFIX}/share/torch_musa_codegen
+  ${TorchMusa_INSTALL_PREFIX}/share/generated_cuda_compatible/include
+  ${TorchMusa_INSTALL_PREFIX}/share/generated_cuda_compatible/include/torch/csrc/api/include
+)
+
+set(TorchMusa_LIBRARIES)
+find_library(TorchMusa_LIBRARY REQUIRED NAMES musa_python PATHS "${TorchMusa_INSTALL_PREFIX}/lib" REQUIRED)
+list(APPEND TorchMusa_LIBRARIES ${TorchMusa_LIBRARY})
+
+add_library(torch_musa SHARED IMPORTED)
+set_target_properties(torch_musa PROPERTIES
+  IMPORTED_LOCATION ${TorchMusa_LIBRARIES}
+  INTERFACE_INCLUDE_DIRECTORIES "${TorchMusa_INCLUDE_DIRS}"
+  INTERFACE_LINK_OPTIONS "-Wl,--as-needed"
+)
+target_link_libraries(torch_musa INTERFACE ${DEPENDENT_TARGETS})
+
+find_package_handle_standard_args(TorchMusa DEFAULT_MSG TorchMusa_LIBRARIES TorchMusa_INCLUDE_DIRS)

@@ -1,0 +1,101 @@
+#include <ATen/Config.h>
+#include <ATen/ExpandUtils.h>
+#include <ATen/MemoryOverlap.h>
+#include <ATen/NativeFunctions.h>
+#include <ATen/native/Resize.h>
+#include <torch/library.h>
+
+#include "torch_musa/csrc/aten/mudnn/MaskedSelect.h"
+#include "torch_musa/csrc/aten/ops/TensorFactory.h"
+#include "torch_musa/csrc/aten/utils/MudnnUtils.h"
+#include "torch_musa/csrc/aten/utils/StateGuard.h"
+#include "torch_musa/csrc/aten/utils/Utils.h"
+
+namespace at {
+namespace musa {
+
+at::Tensor& MaskedSelectOut(
+    const at::Tensor& self,
+    const at::Tensor& mask,
+    at::Tensor& out) {
+  TORCH_CHECK(
+      self.device().type() == kMUSA,
+      "Device of input tensor of MaskedSelect must be MUSA, but now is ",
+      self.device());
+  TORCH_CHECK(
+      mask.device().type() == kMUSA,
+      "Device of mask tensor of MaskedSelect must be MUSA, but now is ",
+      mask.device());
+  TORCH_CHECK(
+      out.device().type() == kMUSA,
+      "Device of output tensor of MaskedSelect must be MUSA, but now is ",
+      out.device());
+  TORCH_CHECK(
+      mask.scalar_type() == ScalarType::Byte ||
+          mask.scalar_type() == ScalarType::Bool,
+      "masked_select: expected BoolTensor or ByteTensor for mask,",
+      " but now is ",
+      mask.scalar_type());
+  TORCH_CHECK(
+      self.scalar_type() == out.scalar_type(),
+      "masked_select(): input and result must have the same scalar type, ",
+      "but now the former is : ",
+      self.scalar_type(),
+      ", and the latter is : ",
+      out.scalar_type());
+  auto mask_temp = (mask.dim() == 0)
+      ? c10::MaybeOwned<Tensor>::owned(mask.unsqueeze(0))
+      : c10::MaybeOwned<Tensor>::borrowed(mask);
+  auto self_temp = (self.dim() == 0)
+      ? c10::MaybeOwned<Tensor>::owned(self.unsqueeze(0))
+      : c10::MaybeOwned<Tensor>::borrowed(self);
+  if (!mask_temp->numel() || !self_temp->numel()) {
+    auto out_tmp = at::empty({0}, self.options());
+    out.copy_(out_tmp);
+    return out;
+  }
+
+  c10::musa::MUSAGuard device_guard(mask.device());
+  c10::MaybeOwned<Tensor> expand_mask, expand_input;
+  std::tie(expand_mask, expand_input) = expand_outplace(*mask_temp, *self_temp);
+  auto contiguous_self = (*expand_input).contiguous();
+  auto contiguous_mask = (*expand_mask).contiguous();
+
+  out.resize_({(*expand_input).numel()});
+  muHandle& h = GetMudnnHandle();
+  ::musa::dnn::MaskedSelect maskedselect_op;
+  auto mt_input = CreateMUTensor(contiguous_self);
+  auto mt_mask = CreateMUTensor(contiguous_mask);
+  auto mt_result = CreateMUTensor(out);
+  CHECK_MUDNN_STATUS(
+      maskedselect_op.Run(h, mt_result, mt_input, mt_mask, InternalMemAlloc),
+      "Run");
+  // Note that implementation of MaskedSelect on MUSA is different from CUDA.
+  // First we malloc sufficient memory for output tensor;
+  // Then MUDNN kernel will compute the actual output shape and sync.
+  // Finally, wo need to reset actual output shape to out tensor.
+  std::vector<int64_t> out_shape;
+  std::vector<int64_t> out_stride;
+  CHECK_MUDNN_STATUS(mt_result.GetNdInfo(out_shape, out_stride), "GetNdInfo");
+  TORCH_INTERNAL_ASSERT(out_shape.size() == 1);
+
+  if (GET_STATE(STRICT_MASK_SELECT)) {
+    out.resize_(out_shape);
+    Tensor out_strict = out.clone();
+    out.set_(out_strict);
+  } else {
+    out.unsafeGetTensorImpl()->set_sizes_and_strides(out_shape, out_stride);
+  }
+
+  return out;
+}
+
+at::Tensor MaskedSelect(const at::Tensor& input, const at::Tensor& mask) {
+  c10::musa::MUSAGuard device_guard(input.device());
+  auto result = at::empty({0}, input.options());
+  MaskedSelectOut(input, mask, result);
+  return result;
+}
+
+} // namespace musa
+} // namespace at

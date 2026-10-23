@@ -1,0 +1,5 @@
+#include "torch_musa/csrc/aten/musa/MUSAMacros.muh"
+#pragma once
+
+#include <ATen/musa/PhiloxCudaState.h>
+#include "torch_musa/csrc/aten/musa/UnpackRaw.muh"

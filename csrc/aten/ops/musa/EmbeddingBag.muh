@@ -1,0 +1,105 @@
+#ifndef TORCH_MUSA_CSRC_ATEN_OPS_MUSA_EMBEDDINGBAG_MUH_
+#define TORCH_MUSA_CSRC_ATEN_OPS_MUSA_EMBEDDINGBAG_MUH_
+
+#include <ATen/AccumulateType.h>
+#include <ATen/core/Tensor.h>
+#include <ATen/native/EmbeddingBag.h>
+
+#include <musa_runtime.h>
+
+namespace at::musa {
+
+template <typename T>
+struct ReduceBase {
+  using CType = at::acc_type<T, true>;
+  int64_t cnt = 0;
+
+  __device__ __forceinline__ void step() {
+    cnt += 1;
+  }
+
+  __device__ __forceinline__ int64_t count() {
+    return cnt;
+  }
+};
+
+template <typename T, native::EmbeddingBagMode mode>
+struct ReduceOp;
+
+template <typename T>
+struct ReduceOp<T, native::EmbeddingBagMode::SUM> : ReduceBase<T> {
+  using Base = ReduceBase<T>;
+  using CType = typename Base::CType;
+
+  CType x = 0.0;
+
+  __device__ __forceinline__ void step(CType y) {
+    x += y;
+    Base::step();
+  }
+
+  __device__ __forceinline__ CType reduce() {
+    return x;
+  }
+};
+
+template <typename T>
+struct ReduceOp<T, native::EmbeddingBagMode::MEAN> : ReduceBase<T> {
+  using Base = ReduceBase<T>;
+  using CType = typename Base::CType;
+
+  CType x = 0.0;
+
+  __device__ __forceinline__ void step(CType y) {
+    x += y;
+    Base::step();
+  }
+
+  __device__ __forceinline__ CType reduce() {
+    if (this->count() == 0) {
+      return x;
+    }
+    return x / this->count();
+  }
+};
+
+template <typename T>
+struct ReduceOp<T, native::EmbeddingBagMode::MAX> : ReduceBase<T> {
+  using Base = ReduceBase<T>;
+  using CType = typename Base::CType;
+
+  CType x = 0.0;
+  int64_t idx = -1;
+
+  __device__ __forceinline__ void step(CType y, int64_t pos) {
+    if (this->count() == 0 || y > x) {
+      x = y;
+      idx = pos;
+    }
+    Base::step();
+  }
+
+  __device__ __forceinline__ int64_t max_idx() {
+    return idx;
+  }
+
+  __device__ __forceinline__ CType reduce() {
+    return x;
+  }
+};
+
+void EmbeddingBagRun(
+    Tensor& out,
+    Tensor& offset2bag,
+    Tensor& bag_size,
+    Tensor& max_indices,
+    const Tensor& weight,
+    const Tensor& indices,
+    const Tensor& offsets,
+    const Tensor& per_sample_weights,
+    const int64_t mode,
+    const int64_t padding_idx);
+
+} // namespace at::musa
+
+#endif // TORCH_MUSA_CSRC_ATEN_OPS_MUSA_EMBEDDINGBAG_MUH_

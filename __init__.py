@@ -1,0 +1,325 @@
+"""Imports the torch musa adaption facilities."""
+
+# pylint: disable=wrong-import-position, W0404, C0103, C2801, W0602
+
+import sys
+import warnings
+import os
+import re
+from typing import NewType, Set, Type, Union
+import contextlib
+
+from packaging.version import Version
+
+try:
+    from .version import __version__
+except ImportError:
+    pass
+
+
+def _autoload():
+    pass
+
+
+import torch
+
+TORCH_MIN_VERSION = Version("2.11.0")
+TORCH_VERSION = Version(torch.__version__).base_version
+if Version(TORCH_VERSION) < TORCH_MIN_VERSION:
+    raise RuntimeError(
+        "torch version must not be less than v2.11.0 when using torch_musa,",
+        " but now torch version is " + torch.__version__,
+    )
+
+if "2.11.0" not in torch.__version__:
+    warnings.warn(
+        "torch version should be v2.11.0 when using torch_musa, but now torch version is "
+        + torch.__version__,
+        UserWarning,
+    )
+
+_tensor_classes: Set[Type] = set()
+
+torch.utils.rename_privateuse1_backend("musa")
+
+try:
+    import torch_musa._MUSAC
+except ImportError as err:
+    raise ImportError("Please try running Python from a different directory!") from err
+
+# Resolve TORCH_RNG_ALIGN to TORCH_ARCH_MP_COUNT/TORCH_ARCH_MAXTHREADS_PER_MP env vars
+# before any C++ code reads device properties.
+# pylint: disable=wrong-import-order
+from .core.random import align_rng_to_nv_gpu  # noqa: E402
+
+align_rng_to_nv_gpu()
+
+torch.__setattr__("musa", sys.modules[__name__])
+
+setattr(
+    torch._C._profiler.ProfilerActivity,
+    "MUSA",
+    torch._C._profiler.ProfilerActivity.PrivateUse1,
+)
+
+from torch_musa.distributed import _apply_distributed_patch
+
+from .core import (
+    current_blas_handle,
+    current_blaslt_handle,
+)
+from .core.device import (
+    Device as device,
+    DeviceOf as device_of,
+    set_device,
+    current_device,
+    is_available,
+    device_count,
+    synchronize,
+    get_device_name,
+    get_device_capability,
+    get_device_properties,
+    can_device_access_peer,
+    _exchange_device,
+    _maybe_exchange_device,
+    _DeviceGuard,
+    register_musa_hook,
+    get_arch_list,
+    get_gencode_flags,
+    set_sync_debug_mode,
+    get_sync_debug_mode,
+    is_bf16_supported,
+    is_tf32_supported,
+)
+
+register_musa_hook()
+
+from .core.stream import (
+    _set_stream_by_id,
+    set_stream,
+    current_stream,
+    default_stream,
+    get_stream_from_external,
+    ExternalStream,
+    StreamContext,
+    stream,
+    Stream,
+    Event,
+)
+from .core import ipc
+from .core import amp
+from .core.amp.common import (
+    amp_definitely_not_available,
+    get_amp_supported_dtype,
+)
+
+from .core.serialization import register_deserialization
+
+from .core import memory
+from .core.memory import *
+
+from .core import _lazy_init as _lazy_init_mod
+
+_lazy_init = _lazy_init_mod._lazy_init
+_lazy_call = _lazy_init_mod._lazy_call
+_is_in_bad_fork = _lazy_init_mod._is_in_bad_fork
+is_initialized = _lazy_init_mod.is_initialized
+musart = _lazy_init_mod.musart
+
+# `_initialized` is deliberately not assigned above like its neighbors.  Rebinding a
+# name to a *function* is safe -- the function object never changes, only what it
+# returns -- but `_initialized` is a plain mutable `False`/`True`, so a static
+# assignment here would capture today's value, not the name, and the rebinding that
+# `_lazy_init()` performs inside `core/_lazy_init` could never reach that copy. Resolve
+# it lazily instead, in `__getattr__` below, so `core/_lazy_init` stays the single
+# source of truth.
+
+
+def __getattr__(name):
+    """Resolve mutable lazy-init state against the module that owns it (PEP 562).
+
+    PyTorch probes backend modules with `getattr(device_module, "_initialized", False)`.
+    `torch.utils.checkpoint` uses that flag to decide whether to stash the device RNG
+    state in the forward pass and replay it in the backward recompute, so a value stuck
+    at `False` silently downgrades `preserve_rng_state=True` to CPU-RNG-only: every
+    stochastic op inside a checkpointed region redraws, and the gradient is wrong with
+    no error and no warning.  `torch.musa` is this module (see `torch.__setattr__`
+    above), which is why the flag has to be live here and not only in the submodule.
+    """
+    if name == "_initialized":
+        return _lazy_init_mod._initialized
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+from .core.ops import *
+
+from .core.random import *
+
+torch.random.fork_rng = fork_rng
+
+from .core.mudnn import *
+from .core.musa import *
+
+_POOL_HANDLE = NewType("_POOL_HANDLE", tuple[int, int])
+
+from .musa_graph import *
+
+from .core import mccl
+
+# A hack to get `torch.backends.mudnn` functions/attributes. This allows users to use cudnn
+# equivalent functions like `torch.backends.mudnn.allow_tf32 = True`
+torch.backends.__setattr__("mudnn", sys.modules["torch_musa.core.mudnn"])
+torch.backends.__setattr__("musa", sys.modules["torch_musa.core.musa"])
+
+register_deserialization()
+
+
+def _sleep(cycles):
+    torch_musa._MUSAC._musa_sleep(cycles)
+
+
+setattr(torch.version, "musa", torch_musa._MUSAC._musa_version)
+
+from .core.tensor_attrs import set_torch_attributes
+from .core.module_attrs import set_module_attributes
+from .core.storage import set_storage_attributes
+
+from .profiler import set_profiler_attributes
+
+from .utils import *
+
+
+def set_attributes():
+    """Set attributes for torch."""
+    set_torch_attributes()
+    set_module_attributes()
+    set_storage_attributes()
+    set_profiler_attributes()
+
+
+set_attributes()
+
+
+def _apply_sharded_grad_scaler_patch():
+    # avoid weird issue (torch.musa.is_available() is False in triton/backends/mtgpu/driver.py)
+    # which caused by circular import when using triton.
+    # pylint: disable=import-outside-toplevel, unused-import
+    from torch.distributed.fsdp import sharded_grad_scaler
+
+    torch.distributed.fsdp.sharded_grad_scaler.ShardedGradScaler = (
+        torch_musa.distributed.fsdp.ShardedGradScaler
+    )
+
+
+def _apply_patches():
+    _apply_distributed_patch()
+    _apply_sharded_grad_scaler_patch()
+
+
+_apply_patches()
+
+
+def ipc_collect():
+    _lazy_init()
+    return _MUSAC._musa_ipc_collect()
+
+
+from .core.reductions import init_reductions
+
+init_reductions()
+
+# Avoiding load all modules of torch._inductor before registing our
+# inductor backend, but things works not well if using the registration way of
+# custom device that provided by PyTorch, thus we use `_init_inductor_backend_registration`
+# as interface for custom device registration.
+# see patch torch_patches/torch__inductor_codegen_common.py.patch
+from ._dynamo import *
+from ._inductor import _init_inductor_backend_registration  # for internal usage
+
+
+def overwrite_cuda_api():
+    torch.cuda._lazy_init = _lazy_init
+    torch.cuda._lazy_call = _lazy_call
+
+
+overwrite_cuda_api()
+
+from .core.ao import *
+
+from .core.ao.register_helper import _register_ao_intrinsic_modules
+
+_register_ao_intrinsic_modules()
+
+# TODO: more elegant patching
+setattr(
+    torch._C,
+    "_conv_determine_backend_memory_format",
+    torch_musa._MUSAC._conv_determine_backend_memory_format,
+)
+
+AcceleratorError = torch._C.AcceleratorError
+OutOfMemoryError = torch._C.OutOfMemoryError
+
+
+# pylint: disable=missing-function-docstring
+def parseEnvForUMM():
+    val = os.getenv("PYTORCH_MUSA_ALLOC_CONF")
+    os.environ["CPU_UNIFIED_FLAG"] = "False"  # inner flag, not exposed to user
+    if val is not None:
+        config = val
+        options = re.split(r"[\s,]+", config.strip())
+        for option in options:
+            kv = re.split(r"[:]+", option.strip())
+            if len(kv) == 2:
+                if kv[0] == "cpu":
+                    if kv[1] == "unified":
+                        torch_musa._MUSAC._musa_register_unified_cpu_allocator()
+                        os.environ["CPU_UNIFIED_FLAG"] = "True"
+                        return
+
+
+parseEnvForUMM()
+
+
+@contextlib.contextmanager
+def use_unified_cpu_allocator():
+    r"""A context manager that use unified cpu allocator,
+    enabling GPU access to CPU-allocated memory.
+
+    Args:
+      None
+
+    .. note::
+        unified cpu allocator works in context
+    """
+    torch_musa._MUSAC._musa_register_unified_cpu_allocator()
+    os.environ["CPU_UNIFIED_FLAG"] = "True"
+    try:
+        yield
+    finally:
+        torch_musa._MUSAC._musa_reset_unified_cpu_allocator()
+        os.environ["CPU_UNIFIED_FLAG"] = "False"
+
+
+@contextlib.contextmanager
+def use_unified_allocator():
+    r"""A context manager that use unified allocator.
+    enabling GPU and CPU access GPU-allocated and CPU-allocated
+    memory.
+
+    Args:
+      None
+
+    .. note::
+        unified allocator works in context
+    """
+    torch_musa._MUSAC._musa_register_unified_cpu_allocator()
+    os.environ["CPU_UNIFIED_FLAG"] = "True"
+    try:
+        alloc = torch_musa._MUSAC._get_musa_unified_allocator()
+        pool = torch.musa.MemPool(alloc)
+        with torch.musa.use_mem_pool(pool):
+            yield
+    finally:
+        torch_musa._MUSAC._musa_reset_unified_cpu_allocator()
+        os.environ["CPU_UNIFIED_FLAG"] = "False"

@@ -1,0 +1,56 @@
+"""apply distributed patch"""
+
+# pylint: disable=C0415
+
+from .tensor import *
+from .hybrid_checkpoint import (
+    HybridCheckpointConfig,
+    apply_hybrid_checkpoint,
+    apply_hybrid_checkpoint_per_layer,
+    get_default_hybrid_checkpoint_offload_ops,
+    get_default_hybrid_checkpoint_ops,
+)
+
+
+# NOTE: DO NOT change the import order, otherwise it may cause unexpected runtime errors
+# TODO: reconsider how to apply patches after FSDP testing done
+def _apply_distributed_patch():
+    from .numa_binding import apply_torchrun_numa_patch
+
+    apply_torchrun_numa_patch()
+
+    from .device_mesh import _apply_device_mesh_patch
+
+    _apply_device_mesh_patch()
+
+    from .fsdp._init_utils import _apply_init_utils_patch
+
+    _apply_init_utils_patch()
+
+    from .fsdp._runtime_utils import _apply_runtime_utils_patch
+
+    _apply_runtime_utils_patch()
+
+    from .dtensor_patches import _apply_dtensor_patches
+
+    _apply_dtensor_patches()
+
+    from ._composable.fsdp.patch import _apply_fsdp2_patches
+
+    _apply_fsdp2_patches()
+
+    from ._state_dict_utils import _apply_state_dict_utils_patch
+
+    _apply_state_dict_utils_patch()
+
+    from .dist_wrapper_patch import _apply_dist_wrapper_patch
+
+    _apply_dist_wrapper_patch()
+
+    from .fsdp._fully_shard import _apply_fully_shard_patch
+
+    _apply_fully_shard_patch()
+
+    from ._symmetric_memory import _apply_symmetric_memory_patch
+
+    _apply_symmetric_memory_patch()

@@ -1,0 +1,8 @@
+#ifndef TORCH_MUSA_CSRC_CORE_STORAGESHARING_H_
+#define TORCH_MUSA_CSRC_CORE_STORAGESHARING_H_
+
+#include <Python.h>
+
+PyMethodDef* GetStorageSharingMethods();
+
+#endif // TORCH_MUSA_CSRC_CORE_STORAGESHARING_H_

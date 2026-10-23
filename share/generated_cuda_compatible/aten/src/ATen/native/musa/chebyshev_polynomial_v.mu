@@ -1,0 +1,32 @@
+#include "torch_musa/csrc/aten/musa/MUSAMacros.muh"
+#define TORCH_ASSERT_NO_OPERATORS
+
+#include <ATen/Dispatch.h>
+#include <ATen/native/musa/JitLoops.muh>
+#include <ATen/native/musa/Loops.muh>
+#include <ATen/native/BinaryOps.h>
+#include <ATen/native/Math.h>
+#include <ATen/native/musa/Math.muh>
+#include <ATen/native/musa/jit_utils.h>
+
+namespace at::native {
+        namespace {
+            constexpr char chebyshev_polynomial_v_name[] = "chebyshev_polynomial_v_forward";
+
+            void chebyshev_polynomial_v_kernel_cuda(TensorIteratorBase& iterator) {
+#if AT_USE_JITERATOR()
+                AT_DISPATCH_FLOATING_TYPES(iterator.common_dtype(), "chebyshev_polynomial_v_cuda", [&]() {
+                    opmath_jitted_gpu_kernel_with_scalars<chebyshev_polynomial_v_name, scalar_t, scalar_t>(iterator, chebyshev_polynomial_v_string);
+                });
+#else
+                AT_DISPATCH_FLOATING_TYPES(iterator.common_dtype(), "chebyshev_polynomial_v_cuda", [&]() {
+                    gpu_kernel_with_scalars(iterator, []GPU_LAMBDA(scalar_t x, scalar_t n) -> scalar_t {
+                        return chebyshev_polynomial_v_forward<scalar_t, true>(x, n);
+                    });
+                });
+#endif
+            } // chebyshev_polynomial_v_kernel_cuda
+        } // namespace (anonymous)
+
+        REGISTER_DISPATCH(chebyshev_polynomial_v_stub, &chebyshev_polynomial_v_kernel_cuda)
+} // namespace at::native

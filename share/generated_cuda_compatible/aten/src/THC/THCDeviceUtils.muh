@@ -1,0 +1,3 @@
+#pragma once
+// TODO: Remove this header
+#include <ATen/musa/DeviceUtils.muh>

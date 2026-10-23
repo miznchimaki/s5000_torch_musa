@@ -1,0 +1,16 @@
+#include "torch_musa/csrc/aten/musa/MUSAMacros.muh"
+#pragma once
+
+#include <ATen/Tensor.h>
+#include <c10/util/Half.h>
+
+#include <musa.h>
+#include <musa_runtime.h>
+#include <musa_fp16.h>
+
+namespace at {
+template <>
+inline __half* Tensor::data() const {
+  return reinterpret_cast<__half*>(data<Half>());
+}
+} // namespace at

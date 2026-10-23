@@ -1,0 +1,111 @@
+#include <ATen/Config.h>
+#include <ATen/NativeFunctions.h>
+#include <ATen/native/Fill.h>
+#include <torch/library.h>
+
+#include "torch_musa/csrc/aten/mudnn/Fill.h"
+#include "torch_musa/csrc/aten/ops/TensorFactory.h"
+#include "torch_musa/csrc/aten/ops/musa/elemwise/Interface.muh"
+#include "torch_musa/csrc/aten/utils/MudnnUtils.h"
+#include "torch_musa/csrc/aten/utils/TensorIterator.h"
+
+namespace at {
+namespace musa {
+
+Tensor& FillOp(
+    Tensor& self,
+    const Scalar& value,
+    const c10::optional<Tensor>& mask = c10::nullopt) {
+  if C10_UNLIKELY (self.numel() == 0) {
+    return self;
+  }
+  if (self.is_complex()) {
+    MusaTensorIterator iter;
+    iter.add_output(self);
+
+    TensorIteratorConfig config;
+    config.set_check_mem_overlap(false)
+        .check_all_same_dtype(false)
+        .resize_outputs(false);
+
+    iter.build(config);
+    FillKernel(iter, value);
+    return self;
+  }
+  c10::musa::MUSAGuard device_guard(self.device());
+  auto& h = GetMudnnHandle();
+  auto self_mu = at::musa::CreateMUTensor(self);
+
+  ::musa::dnn::Fill op;
+  const auto fill_type = self.scalar_type();
+  if (fill_type == ScalarType::Bool) {
+    const auto fill_value = static_cast<int64_t>(value.to<bool>());
+    SetFill(op, fill_value);
+  } else if (isIntegralType(fill_type, false)) {
+    SetFill(op, value.toLong());
+  } else {
+    SetFill(op, value.toDouble());
+  }
+  if (mask.has_value()) {
+    TORCH_CHECK(
+        self.device() == mask->device(),
+        "expected self and mask to be on the same device, but got mask on ",
+        mask->device(),
+        " and self on ",
+        self.device());
+    TORCH_CHECK(
+        mask->scalar_type() == kBool,
+        "masked_fill only supports boolean masks, but got dtype ",
+        mask->scalar_type());
+    auto mask_mu = at::musa::CreateMUTensor(mask.value());
+    CHECK_MUDNN_STATUS(op.Run(h, self_mu, mask_mu), "RunMask");
+  } else {
+    CHECK_MUDNN_STATUS(op.Run(h, self_mu), "Run");
+  }
+  return self;
+}
+
+Tensor& Fill(Tensor& self, const Scalar& value) {
+  return FillOp(self, value);
+}
+
+Tensor& Fill_(Tensor& self, const Tensor& value) {
+  TORCH_CHECK(
+      value.dim() == 0,
+      "fill_ only supports a 0-dimensional value tensor, but got tensor "
+      "with ",
+      value.dim(),
+      " dimension(s).");
+  return FillOp(self, value.item());
+}
+
+Tensor& Zero_(Tensor& self) {
+  return FillOp(self, 0.0);
+}
+
+Tensor& MaskedFill(Tensor& self, const Tensor& mask, const Scalar& value) {
+  return FillOp(self, value, mask);
+}
+
+Tensor& MaskedFillTensor(
+    Tensor& self,
+    const Tensor& mask,
+    const Tensor& value) {
+  TORCH_CHECK(
+      value.dim() == 0,
+      "masked_fill_ only supports a 0-dimensional value tensor, but got tensor "
+      "with ",
+      value.dim(),
+      " dimension(s).");
+  // We hit this function if either of the input tensor lives on MUSA.
+  // It is ok, if `value` is `CPU` tensor but we should not allow `self` or
+  // `mask` to be CPU tensor. Check for `self` and `mask` being on same device
+  // exists in `masked_fill__cuda` (Scalar version).
+  TORCH_CHECK(
+      !self.device().is_cpu(),
+      "masked_fill_: Expected inputs to be on same device")
+  return FillOp(self, value.item(), mask);
+}
+
+} // namespace musa
+} // namespace at
